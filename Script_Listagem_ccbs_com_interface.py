@@ -95,9 +95,27 @@ else:
             return f"{value[:2]}.{value[2:5]}.{value[5:8]}/{value[8:12]}-{value[12:]}"
         return value
 
+    def traduzir_status(status):
+        mapa = {
+            "draft": "Rascunho",
+            "confirmed": "Confirmado",
+            "admin_analysis": "Análise Administrativa",
+            "cancelled": "Cancelado",
+            "bookkeeper_analysis": "Análise Contábil",
+            "banker": "Aguardando Banco",
+            "analyze": "Em Análise",
+            "returned": "Devolvido",
+            "refused": "Recusado",
+            "signature": "Aguardando Assinatura",
+            "signed": "Assinado",
+            "assignment_process": "Processo de Cessão",
+            "disbursed": "Desembolsado"
+        }
+        return mapa.get(status, status)
+
     def format_currency(value):
         try:
-            return f"R$ {float(value):,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+            return "{:.2f}".format(value).replace(".",",")
         except:
             return value
 
@@ -115,23 +133,22 @@ else:
             except Exception:
                 valor_total = "Erro"
 
-            # Buscar e calcular parcelas
             installments = fetch_installments(api_key, item.get("id"))
             total_amortization = sum(float(i.get("amortization", 0)) for i in installments)
             total_interest = sum(float(i.get("interest_value", 0)) for i in installments)
-            parcela_valor = installments[0].get("total_value") if installments else 0
+            parcela_valor = float(installments[0].get("total_value")) if installments else 0
 
             rows.append({
-                
+                "id": item.get("id"),
                 "Data de Criação": datetime.strptime(item.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%d/%m/%Y") if item.get("created_at") else "",
                 "CCB": item.get("ccb_number"),
                 "Nome": item.get("debtor", {}).get("name"),
                 "CPF/CNPJ": formatted_ident,
                 "Valor Liquido": format_currency(item.get("value")),
                 "Parcelas": item.get("installments_quantity"),
-                "Taxa": f"{item.get("tax_percentage", 0)}%",
+                "Taxa": f"{item.get('tax_percentage', 0)}%",
                 "Primeira Parcela": datetime.strptime(item.get("first_installment_date"), "%Y-%m-%d").strftime("%d/%m/%Y") if item.get("first_installment_date") else "",
-                "Status": item.get("status"),
+                "Status": traduzir_status(item.get("status")),
                 "Total desembolsado": format_currency(total_amortization),
                 "Total Juros": format_currency(total_interest),
                 "Valor da Parcela": format_currency(parcela_valor),
@@ -139,6 +156,7 @@ else:
             })
         return pd.DataFrame(rows)
 
+    df = None
     if (fetch_button or fetch_all_button) and api_key:
         if fetch_all_button:
             date_from = datetime(2024, 1, 1)
@@ -150,19 +168,72 @@ else:
                 datetime.combine(date_from, datetime.min.time()) if date_from else None,
                 datetime.combine(date_to, datetime.max.time()) if date_to else None
             )
-            df = parse_data(df_raw)
-            st.success(f"Foram encontrados {len(df)} registros.")
+            df = pd.DataFrame()
+            st.session_state.df_raw = df_raw
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+            total = len(df_raw)
+            start_time = datetime.now()
+            for i, item in enumerate(df_raw):
+                parsed = parse_data([item])
+                df = pd.concat([df, parsed], ignore_index=True)
+                st.session_state.df = df
+                progress = (i + 1) / total
+                elapsed = (datetime.now() - start_time).total_seconds()
+                est_total = (elapsed / (i + 1)) * total
+                est_remaining = max(est_total - elapsed, 0)
+                progress_bar.progress(progress)
+                progress_text.text(f"Progresso: {int(progress * 100)}% | Tempo restante estimado: {int(est_remaining)}s")
+            progress_bar.empty()
+    elif not fetch_button and not fetch_all_button:
+        df = st.session_state.get("df")
 
-            st.dataframe(df)
+    if df is not None and not df.empty:
+        st.dataframe(df)
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            st.download_button(
-                label="📥 Baixar Excel",
-                data=output.getvalue(),
-                file_name="grafeno_ccbs.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        st.download_button(
+            label="📥 Baixar planilha geral das CCBs",
+            data=output.getvalue(),
+            file_name="grafeno_ccbs.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.subheader("🔍 Buscar parcelas por número de CCB")
+        ccb_search = st.text_input("Digite o número da CCB", key="ccb_search")
+        if ccb_search:
+            ccb_row = df[df['CCB'] == ccb_search]
+            if not ccb_row.empty:
+                selected_id = ccb_row.iloc[0]['id']
+                installments = fetch_installments(api_key, selected_id)
+                if installments:
+                    nome = ccb_row.iloc[0]['Nome']
+                    documento = ccb_row.iloc[0]['CPF/CNPJ']
+                    tabela = pd.DataFrame([{
+                        "Parcela": i + 1,
+                        "Vencimento": datetime.strptime(inst['due_date'], "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%d/%m/%Y"),
+                        "Amortização": format_currency(inst['amortization']),
+                        "Juros": format_currency(inst['interest_value']),
+                        "Valor Parcela": format_currency(inst['total_value'])
+                    } for i, inst in enumerate(installments)])
+                    st.write(f"📄 Parcelas para CCB {ccb_search} - {nome} ({documento}):")
+                    st.dataframe(tabela, use_container_width=True)
+
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        tabela.to_excel(writer, index=False)
+                    st.download_button(
+                        label="📥 Baixar parcelas em Excel",
+                        data=output.getvalue(),
+                        file_name=f"parcelas_ccb_{ccb_search}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("Nenhuma parcela encontrada para esta CCB.")
+            else:
+                st.warning("CCB não encontrada na base carregada.")
+
     elif (fetch_button or fetch_all_button) and not api_key:
         st.warning("Por favor, informe a API Key.")
