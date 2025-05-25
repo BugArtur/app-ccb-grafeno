@@ -62,7 +62,11 @@
 #                 "page": page,
 #                 "limit": 100
 #             }
-#             response = requests.get(BASE_URL, headers=headers, params=params)
+#             try:
+#                 response = requests.get(BASE_URL, headers=headers, params=params, timeout=60)
+#             except requests.exceptions.ReadTimeout:
+#                 st.error("A requisição demorou muito e foi interrompida. Tente novamente mais tarde.")
+#                 return []
 #             if response.status_code != 200:
 #                 st.error(f"Erro ao buscar dados: {response.status_code}")
 #                 return []
@@ -115,14 +119,18 @@
 
 #     def format_currency(value):
 #         try:
-#             return "{:.2f}".format(value).replace(".",",")
+#             return f"R$ {float(value):,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
 #         except:
 #             return value
 
 #     def parse_data(data):
 #         rows = []
 #         for item in data:
-#             ident = item.get("debtor", {}).get("identification")
+#             debtor = item.get("debtor")
+#             if isinstance(debtor, dict):
+#                 ident = debtor.get("identification")
+#             else:
+#                 ident = ""
 #             formatted_ident = format_cpf_cnpj(ident) if ident else ""
 
 #             try:
@@ -136,13 +144,13 @@
 #             installments = fetch_installments(api_key, item.get("id"))
 #             total_amortization = sum(float(i.get("amortization", 0)) for i in installments)
 #             total_interest = sum(float(i.get("interest_value", 0)) for i in installments)
-#             parcela_valor = float(installments[0].get("total_value")) if installments else 0
+#             parcela_valor = installments[0].get("total_value") if installments else 0
 
 #             rows.append({
 #                 "id": item.get("id"),
 #                 "Data de Criação": datetime.strptime(item.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%d/%m/%Y") if item.get("created_at") else "",
 #                 "CCB": item.get("ccb_number"),
-#                 "Nome": item.get("debtor", {}).get("name"),
+#                 "Nome": debtor.get("name") if isinstance(debtor, dict) else "",
 #                 "CPF/CNPJ": formatted_ident,
 #                 "Valor Liquido": format_currency(item.get("value")),
 #                 "Parcelas": item.get("installments_quantity"),
@@ -237,7 +245,6 @@
 
 #     elif (fetch_button or fetch_all_button) and not api_key:
 #         st.warning("Por favor, informe a API Key.")
-
 import requests
 import pandas as pd
 import streamlit as st
@@ -437,6 +444,21 @@ else:
         df = st.session_state.get("df")
 
     if df is not None and not df.empty:
+        st.markdown("### 📊 Indicadores: empréstimos desembolsados com sucesso")
+
+        # KPIs gerais
+        df_desembolsado = df[df['Status'] == 'Desembolsado']
+        total_ccbs = len(df_desembolsado)
+        total_liquido = sum(float(str(v).replace('R$','').replace('.','').replace(',','.')) for v in df_desembolsado['Valor Liquido'])
+        total_desembolsado = sum(float(str(v).replace('R$','').replace('.','').replace(',','.')) for v in df_desembolsado['Total desembolsado'])
+        total_juros = sum(float(str(v).replace('R$','').replace('.','').replace(',','.')) for v in df_desembolsado['Total Juros'])
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total de CCBs", total_ccbs)
+        col2.metric("Valor Líquido Total", format_currency(total_liquido))
+        col3.metric("Total Desembolsado", format_currency(total_desembolsado))
+        col4.metric("Total de Juros", format_currency(total_juros))
+
         st.dataframe(df)
 
         output = io.BytesIO()
@@ -459,6 +481,18 @@ else:
                 if installments:
                     nome = ccb_row.iloc[0]['Nome']
                     documento = ccb_row.iloc[0]['CPF/CNPJ']
+                    # KPIs
+                    total_parcelas = len(installments)
+                    total_amortizacao = sum(float(i.get("amortization", 0)) for i in installments)
+                    total_juros = sum(float(i.get("interest_value", 0)) for i in installments)
+                    total_pago = sum(float(i.get("total_value", 0)) for i in installments)
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Parcelas", total_parcelas)
+                    col2.metric("Total Amortização", format_currency(total_amortizacao))
+                    col3.metric("Total Juros", format_currency(total_juros))
+                    col4.metric("Total a Pagar", format_currency(total_pago))
+
                     tabela = pd.DataFrame([{
                         "Parcela": i + 1,
                         "Vencimento": datetime.strptime(inst['due_date'], "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%d/%m/%Y"),
